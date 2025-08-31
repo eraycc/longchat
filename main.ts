@@ -1,8 +1,17 @@
-// deno
+// bun runtime
 
 // 环境变量配置
-const API_BASEURL = Deno.env.get("API_BASEURL") || "https://longcat.chat";
-const AUTH_COOKIES = Deno.env.get("AUTH_COOKIES") || "Ag1,Ag2,Ag3…，可以通过AUTH_COOKIES环境变量设置，支持多个账户cookie使用英文逗号分隔，不推荐大量白嫖，有被ban的风险";
+const API_BASEURL = process.env.API_BASEURL || "https://longcat.chat";
+const AUTH_COOKIES = process.env.AUTH_COOKIES || "Ag1,Ag2,Ag3…，可以通过AUTH_COOKIES环境变量设置，支持多个账户cookie使用英文逗号分隔，不推荐大量白嫖，有被ban的风险";
+
+// 调试：输出环境变量
+console.log('=== 环境变量调试 ===');
+console.log('API_BASEURL:', API_BASEURL);
+console.log('AUTH_COOKIES length:', AUTH_COOKIES.length);
+console.log('AUTH_COOKIES preview:', AUTH_COOKIES.substring(0, 50) + '...');
+console.log('process.env.AUTH_COOKIES:', process.env.AUTH_COOKIES || 'undefined');
+console.log('process.env.API_BASEURL:', process.env.API_BASEURL || 'undefined');
+console.log('===================');
 
 // 浏览器 UA 列表
 const USER_AGENTS = [
@@ -12,6 +21,141 @@ const USER_AGENTS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ];
+
+// Cookie 轮询管理
+interface CookieInfo {
+  cookie: string;
+  successCount: number;
+  failureCount: number;
+  requestCount: number;
+  rotationFailures: number; // 轮询失败计数
+  lastUsed: number;
+  permanentlyDisabled: boolean; // 永久禁用
+  disabledAt: number;
+}
+
+class CookieRoundRobin {
+  private cookies: CookieInfo[] = [];
+  private currentIndex = 0;
+  private requestsPerCookie = 3; // 每个 Cookie 请求 3 次
+  private currentCookieRequests = 0;
+  private maxRotationFailures = 5; // 轮询失败5次永久禁用
+
+  constructor(cookies: string[]) {
+    this.initializeCookies(cookies);
+  }
+
+  private initializeCookies(cookies: string[]) {
+    this.cookies = cookies.map(cookie => ({
+      cookie,
+      successCount: 0,
+      failureCount: 0,
+      requestCount: 0,
+      rotationFailures: 0,
+      lastUsed: 0,
+      permanentlyDisabled: false,
+      disabledAt: 0
+    }));
+  }
+
+  // 获取下一个 Cookie（轮询）
+  getNextCookie(): string | null {
+    if (this.cookies.length === 0) {
+      return null;
+    }
+
+    // 找到下一个可用的 Cookie
+    let attempts = 0;
+    while (attempts < this.cookies.length) {
+      const cookie = this.cookies[this.currentIndex];
+      
+      // 检查 Cookie 是否被永久禁用
+      if (cookie.permanentlyDisabled) {
+        console.log(`[DEBUG] Cookie [${this.currentIndex + 1}/${this.cookies.length}] 已永久禁用，跳过`);
+        this.currentIndex = (this.currentIndex + 1) % this.cookies.length;
+        this.currentCookieRequests = 0;
+        attempts++;
+        continue;
+      }
+
+      this.currentCookieRequests++;
+      cookie.requestCount++;
+      cookie.lastUsed = Date.now();
+
+      console.log(`[DEBUG] 使用 Cookie [${this.currentIndex + 1}/${this.cookies.length}] (第${this.currentCookieRequests}/${this.requestsPerCookie}次, 轮询失败:${cookie.rotationFailures}/${this.maxRotationFailures})`);
+      
+      // 检查是否需要切换到下一个 Cookie
+      if (this.currentCookieRequests >= this.requestsPerCookie) {
+        this.currentCookieRequests = 0;
+        this.currentIndex = (this.currentIndex + 1) % this.cookies.length;
+        console.log(`[DEBUG] 切换到下一个 Cookie [${this.currentIndex + 1}/${this.cookies.length}]`);
+      }
+
+      return cookie.cookie;
+    }
+
+    console.log(`[WARN] 所有 Cookie 都被永久禁用了`);
+    return null;
+  }
+
+  // 记录成功
+  recordSuccess(cookie: string) {
+    const cookieInfo = this.cookies.find(c => c.cookie === cookie);
+    if (cookieInfo) {
+      cookieInfo.successCount++;
+      cookieInfo.rotationFailures = 0; // 重置轮询失败计数
+      console.log(`[DEBUG] Cookie 成功计数: ${cookieInfo.successCount}/${cookieInfo.requestCount} (重置轮询失败计数)`);
+    }
+  }
+
+  // 记录失败（轮询失败）
+  recordRotationFailure(cookie: string) {
+    const cookieInfo = this.cookies.find(c => c.cookie === cookie);
+    if (cookieInfo) {
+      cookieInfo.failureCount++;
+      cookieInfo.rotationFailures++;
+      
+      console.log(`[DEBUG] Cookie 轮询失败计数: ${cookieInfo.failureCount}/${cookieInfo.requestCount} (轮询失败: ${cookieInfo.rotationFailures}/${this.maxRotationFailures})`);
+      
+      // 检查是否需要永久禁用
+      if (cookieInfo.rotationFailures >= this.maxRotationFailures) {
+        cookieInfo.permanentlyDisabled = true;
+        cookieInfo.disabledAt = Date.now();
+        console.log(`[ERROR] Cookie [${this.cookies.indexOf(cookieInfo) + 1}] 轮询失败${cookieInfo.rotationFailures}次，已永久禁用`);
+      }
+    }
+  }
+
+  // 获取统计信息
+  getStats() {
+    return this.cookies.map((cookie, index) => ({
+      index: index + 1,
+      successCount: cookie.successCount,
+      failureCount: cookie.failureCount,
+      requestCount: cookie.requestCount,
+      rotationFailures: cookie.rotationFailures,
+      permanentlyDisabled: cookie.permanentlyDisabled,
+      disabledAt: cookie.disabledAt,
+      successRate: cookie.requestCount > 0 
+        ? (cookie.successCount / cookie.requestCount * 100).toFixed(1) + '%'
+        : '0%',
+      isActive: index === this.currentIndex
+    }));
+  }
+
+  // 获取当前 Cookie 索引
+  getCurrentIndex(): number {
+    return this.currentIndex;
+  }
+
+  // 获取当前 Cookie 已使用次数
+  getCurrentCookieRequests(): number {
+    return this.currentCookieRequests;
+  }
+}
+
+// 全局 Cookie 轮询管理器
+let cookieRoundRobin: CookieRoundRobin;
 
 // 获取随机元素
 function getRandomElement<T>(arr: T[]): T {
@@ -48,8 +192,46 @@ function formatMessages(messages: any[]): string {
   return messages.map(msg => `${msg.role}:${msg.content}`).join(";");
 }
 
-// 创建会话
-async function createSession(cookie: string, userAgent: string): Promise<string> {
+// 带重试的会话创建
+async function createSessionWithRetry(cookies: string[], userAgent: string): Promise<{ conversationId: string; usedCookie: string }> {
+  const errors: string[] = [];
+  
+  for (let i = 0; i < cookies.length; i++) {
+    const cookie = cookies[i];
+    console.log(`[DEBUG] 尝试 Cookie [${i + 1}/${cookies.length}] 创建会话...`);
+    
+    try {
+      const conversationId = await createSingleSession(cookie, userAgent);
+      console.log(`[DEBUG] Cookie [${i + 1}/${cookies.length}] 会话创建成功`);
+      return { conversationId, usedCookie: cookie };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      errors.push(`Cookie [${i + 1}]: ${errorMsg}`);
+      console.log(`[DEBUG] Cookie [${i + 1}/${cookies.length}] 会话创建失败: ${errorMsg}`);
+      
+      // 记录失败
+      if (cookieRoundRobin) {
+        cookieRoundRobin.recordFailure(cookie);
+      }
+      
+      // 如果不是最后一个 Cookie，继续尝试下一个
+      if (i < cookies.length - 1) {
+        console.log(`[DEBUG] 尝试下一个 Cookie...`);
+        continue;
+      }
+    }
+  }
+  
+  // 所有 Cookie 都失败了
+  throw new Error(`所有 Cookie 都失败了: ${errors.join('; ')}`);
+}
+
+// 单个 Cookie 会话创建
+async function createSingleSession(cookie: string, userAgent: string): Promise<string> {
+  console.log(`[DEBUG] 使用 API_BASEURL: ${API_BASEURL}`);
+  console.log(`[DEBUG] Cookie 长度: ${cookie.length}`);
+  console.log(`[DEBUG] User-Agent: ${userAgent}`);
+  
   const response = await fetch(`${API_BASEURL}/api/v1/session-create`, {
     method: "POST",
     headers: {
@@ -67,14 +249,21 @@ async function createSession(cookie: string, userAgent: string): Promise<string>
   });
 
   if (!response.ok) {
-    throw new Error(`Session creation failed: ${response.status}`);
+    console.log(`[DEBUG] 会话创建失败 - HTTP ${response.status}`);
+    const errorText = await response.text();
+    console.log(`[DEBUG] 错误响应: ${errorText}`);
+    throw new Error(`HTTP ${response.status}: ${errorText}`);
   }
 
   const data = await response.json();
+  console.log(`[DEBUG] 会话创建响应:`, data);
+  
   if (data.code !== 0) {
-    throw new Error(`Session creation error: ${data.message}`);
+    console.log(`[DEBUG] 会话创建错误 - 代码: ${data.code}, 消息: ${data.message}`);
+    throw new Error(data.message);
   }
 
+  console.log(`[DEBUG] 会话创建成功 - conversationId: ${data.data.conversationId}`);
   return data.data.conversationId;
 }
 
@@ -351,6 +540,28 @@ async function handleRequest(request: Request): Promise<Response> {
     });
   }
 
+  // 处理 /stats 请求 - 查看 Cookie 状态
+  if (url.pathname === "/stats" && request.method === "GET") {
+    if (!cookieRoundRobin) {
+      return new Response(JSON.stringify({
+        error: "Cookie 轮询器未初始化"
+      }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    
+    const stats = cookieRoundRobin.getStats();
+    return new Response(JSON.stringify({
+      totalCookies: stats.length,
+      currentCookie: cookieRoundRobin.getCurrentIndex() + 1,
+      currentRequests: cookieRoundRobin.getCurrentCookieRequests(),
+      cookies: stats
+    }), {
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
   // 处理 /v1/chat/completions 请求
   if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
     let conversationId: string | null = null;
@@ -362,17 +573,69 @@ async function handleRequest(request: Request): Promise<Response> {
       const body = await request.json();
       const { messages, stream = false, model = "LongCat" } = body;
 
-      // 获取 cookie
+      // 获取 cookie - 使用 Cookie 轮询器
       const authHeader = request.headers.get("Authorization");
       const userCookies = parseAuthCookies(authHeader);
-      const cookiePool = userCookies || AUTH_COOKIES.split(",");
-      selectedCookie = getRandomElement(cookiePool);
+      
+      let cookiesToUse: string[];
+      if (userCookies && userCookies.length > 0) {
+        // 使用用户提供的 cookies
+        cookiesToUse = userCookies;
+        if (!cookieRoundRobin) {
+          cookieRoundRobin = new CookieRoundRobin(userCookies);
+        }
+      } else {
+        // 使用环境变量中的 cookies
+        const envCookies = AUTH_COOKIES.split(",").filter(c => c.trim());
+        cookiesToUse = envCookies;
+        if (!cookieRoundRobin) {
+          cookieRoundRobin = new CookieRoundRobin(envCookies);
+        }
+      }
       
       // 获取随机 UA
       userAgent = getRandomElement(USER_AGENTS);
 
-      // 创建会话
-      conversationId = await createSession(selectedCookie, userAgent);
+      // 使用轮询获取 Cookie，如果失败则重试所有 Cookie
+      let sessionResult: { conversationId: string; usedCookie: string };
+      
+      // 首先尝试当前轮询的 Cookie
+      const currentCookie = cookieRoundRobin.getNextCookie();
+      if (currentCookie) {
+        try {
+          sessionResult = await createSessionWithRetry([currentCookie], userAgent);
+          selectedCookie = sessionResult.usedCookie;
+          conversationId = sessionResult.conversationId;
+          
+          // 记录成功
+          cookieRoundRobin.recordSuccess(selectedCookie);
+        } catch (error) {
+          console.log(`[DEBUG] 当前轮询 Cookie 失败，记录轮询失败...`);
+          // 记录轮询失败
+          cookieRoundRobin.recordRotationFailure(currentCookie);
+          
+          console.log(`[DEBUG] 尝试所有可用 Cookie...`);
+          // 如果当前 Cookie 失败，尝试所有可用的 Cookie（排除永久禁用的）
+          const availableCookies = cookiesToUse.filter(cookie => {
+            const cookieInfo = cookieRoundRobin['cookies'].find((c: any) => c.cookie === cookie);
+            return !cookieInfo?.permanentlyDisabled;
+          });
+          
+          if (availableCookies.length === 0) {
+            throw new Error("所有 Cookie 都被永久禁用了");
+          }
+          
+          sessionResult = await createSessionWithRetry(availableCookies, userAgent);
+          selectedCookie = sessionResult.usedCookie;
+          conversationId = sessionResult.conversationId;
+          
+          // 记录成功
+          cookieRoundRobin.recordSuccess(selectedCookie);
+        }
+      } else {
+        // 没有可用的 Cookie
+        throw new Error("没有可用的 Cookie");
+      }
 
       // 准备聊天请求
       const formattedContent = formatMessages(messages);
@@ -404,7 +667,8 @@ async function handleRequest(request: Request): Promise<Response> {
       }
 
       // 处理响应
-      return await handleStreamResponse(chatResponse, stream, model, conversationId, selectedCookie, userAgent);
+      const response = await handleStreamResponse(chatResponse, stream, model, conversationId, selectedCookie, userAgent);
+      return response;
 
     } catch (error) {
       // 如果出错，也在后台尝试删除会话（带延迟）
@@ -429,5 +693,10 @@ async function handleRequest(request: Request): Promise<Response> {
   return new Response("Not Found", { status: 404 });
 }
 
-// Deno Deploy 入口
-Deno.serve(handleRequest);
+// Bun/Node.js 入口
+const server = Bun.serve({
+  port: 8000,
+  fetch: handleRequest
+});
+
+console.log(`Server running on http://localhost:${server.port}`);

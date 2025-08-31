@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  longchat:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - API_BASEURL=${API_BASEURL:-https://longcat.chat}
+      - AUTH_COOKIES=${AUTH_COOKIES}
+    restart: unless-stopped
+    container_name: longchat-proxy
